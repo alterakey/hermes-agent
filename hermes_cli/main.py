@@ -11556,6 +11556,16 @@ Examples:
         "--limit", type=int, default=500, help="Max sessions to load (default: 500)"
     )
 
+    sessions_import = sessions_subparsers.add_parser(
+        "import", help="Import sessions from a JSONL file"
+    )
+    sessions_import.add_argument(
+        "input", help="Input JSONL file path (exported via 'hermes sessions export')"
+    )
+    sessions_import.add_argument(
+        "--dry-run", action="store_true", help="Preview what would be imported without writing"
+    )
+
     def _confirm_prompt(prompt: str) -> bool:
         """Prompt for y/N confirmation, safe against non-TTY environments."""
         try:
@@ -11722,6 +11732,58 @@ Examples:
             if db_path.exists():
                 size_mb = os.path.getsize(db_path) / (1024 * 1024)
                 print(f"Database size: {size_mb:.1f} MB")
+
+        elif action == "import":
+            import os as _os
+
+            input_path = args.input
+            if not _os.path.exists(input_path):
+                print(f"Error: File not found: {input_path}")
+                return
+
+            # Read and parse JSONL file
+            sessions_to_import = []
+            try:
+                with open(input_path, "r", encoding="utf-8") as f:
+                    for line_num, line in enumerate(f, 1):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            data = _json.loads(line)
+                            sessions_to_import.append(data)
+                        except _json.JSONDecodeError as e:
+                            print(f"Error parsing line {line_num}: {e}")
+                            return
+            except Exception as e:
+                print(f"Error reading file: {e}")
+                return
+
+            if not sessions_to_import:
+                print("No sessions found in file.")
+                return
+
+            # Preview
+            print(f"Found {len(sessions_to_import)} session(s) to import:")
+            for s in sessions_to_import:
+                title = s.get("title") or "Untitled"
+                msg_count = len(s.get("messages", []))
+                source = s.get("source", "unknown")
+                print(f"  - \"{title}\" ({msg_count} messages, source: {source})")
+
+            if args.dry_run:
+                print("\nDry run — no changes made.")
+                return
+
+            # Import sessions
+            imported_ids = []
+            for data in sessions_to_import:
+                new_id = db.import_session(data)
+                imported_ids.append(new_id)
+
+            print(f"\nImported {len(imported_ids)} session(s):")
+            for i, sid in enumerate(imported_ids, 1):
+                print(f"  {i}. {sid}")
 
         else:
             sessions_parser.print_help()

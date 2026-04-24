@@ -2234,6 +2234,133 @@ class SessionDB:
             results.append({**session, "messages": messages})
         return results
 
+    def import_session(self, data: Dict[str, Any], session_id: str = None) -> str:
+        """
+        Import a session from an export dict.
+
+        Creates a new session with the same metadata and all messages.
+        Generates a new session ID unless one is provided.
+        Returns the imported session ID.
+        """
+        import uuid
+
+        # Generate new session ID or use provided one
+        new_session_id = session_id or str(uuid.uuid4())
+
+        # Extract session metadata
+        source = data.get("source", "imported")
+        model = data.get("model")
+        system_prompt = data.get("system_prompt")
+        title = data.get("title")
+        user_id = data.get("user_id")
+        parent_session_id = data.get("parent_session_id")  # Usually None for imports
+        started_at = data.get("started_at")
+        ended_at = data.get("ended_at")
+        end_reason = data.get("end_reason")
+
+        # Parse model_config if it's a string
+        model_config = data.get("model_config")
+        if isinstance(model_config, str):
+            try:
+                model_config = json.loads(model_config)
+            except json.JSONDecodeError:
+                model_config = None
+
+        def _do(conn):
+            # Insert session record preserving original timestamps if available
+            conn.execute(
+                """INSERT INTO sessions (id, source, user_id, model, model_config,
+                   system_prompt, title, parent_session_id, started_at, ended_at, end_reason,
+                   message_count, tool_call_count)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    new_session_id,
+                    source,
+                    user_id,
+                    model,
+                    json.dumps(model_config) if model_config else None,
+                    system_prompt,
+                    title,
+                    parent_session_id,
+                    started_at or time.time(),
+                    ended_at,
+                    end_reason,
+                    0,  # Will be updated as messages are inserted
+                    0,
+                ),
+            )
+
+            # Import messages
+            messages = data.get("messages", [])
+            msg_count = 0
+            tool_call_count = 0
+
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content")
+                tool_name = msg.get("tool_name")
+                tool_call_id = msg.get("tool_call_id")
+                token_count = msg.get("token_count")
+                finish_reason = msg.get("finish_reason")
+                reasoning = msg.get("reasoning")
+                reasoning_content = msg.get("reasoning_content")
+                timestamp = msg.get("timestamp") or time.time()
+
+                # Handle JSON fields
+                tool_calls = msg.get("tool_calls")
+                if isinstance(tool_calls, str):
+                    tool_calls = tool_calls  # Already JSON string in DB
+                elif tool_calls is not None:
+                    tool_calls = json.dumps(tool_calls)
+
+                reasoning_details = msg.get("reasoning_details")
+                if isinstance(reasoning_details, str):
+                    reasoning_details = reasoning_details
+                elif reasoning_details is not None:
+                    reasoning_details = json.dumps(reasoning_details)
+
+                codex_reasoning_items = msg.get("codex_reasoning_items")
+                if isinstance(codex_reasoning_items, str):
+                    codex_reasoning_items = codex_reasoning_items
+                elif codex_reasoning_items is not None:
+                    codex_reasoning_items = json.dumps(codex_reasoning_items)
+
+                conn.execute(
+                    """INSERT INTO messages (session_id, role, content, tool_call_id,
+                       tool_calls, tool_name, timestamp, token_count, finish_reason,
+                       reasoning, reasoning_content, reasoning_details, codex_reasoning_items)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        new_session_id,
+                        role,
+                        content,
+                        tool_call_id,
+                        tool_calls,
+                        tool_name,
+                        timestamp,
+                        token_count,
+                        finish_reason,
+                        reasoning,
+                        reasoning_content,
+                        reasoning_details,
+                        codex_reasoning_items,
+                    ),
+                )
+
+                msg_count += 1
+                if role == "tool" or tool_calls:
+                    tool_call_count += 1
+
+            # Update counters
+            conn.execute(
+                """UPDATE sessions SET message_count = ?, tool_call_count = ?
+                   WHERE id = ?""",
+                (msg_count, tool_call_count, new_session_id),
+            )
+
+        self._execute_write(_do)
+        return new_session_id
+
     def clear_messages(self, session_id: str) -> None:
         """Delete all messages for a session and reset its counters."""
         def _do(conn):
